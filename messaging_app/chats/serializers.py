@@ -2,59 +2,62 @@ from rest_framework import serializers
 from .models import User, Conversation, Message
 
 class UserSerializer(serializers.ModelSerializer):
-    full_name = serializers.CharField(source='get_full_name', read_only=True)
+    display_name = serializers.CharField(source='get_full_name', read_only=True)
 
     class Meta:
         model = User
-        fields = ['user_id', 'username', 'email', 'first_name', 'last_name', 'phone_number', 'full_name']
-        read_only_fields = ['user_id', 'full_name']
+        fields = ['id', 'email', 'first_name', 'last_name', 'phone_number', 'password']
+        extra_kwargs = {
+            'password': {'write_only': True}
+        }
+
+    def create(self, validated_data):
+        """Create a new User instance with a hashed password."""
+        user = User(
+            email=validated_data['email'],
+            first_name=validated_data['first_name'],
+            last_name=validated_data['last_name'],
+            phone_number=validated_data.get('phone_number', '')
+        )
+        user.set_password(validated_data['password'])
+        user.save()
+        return user
+
+    def validate_email(self, value):
+        if "spam" in value:
+            raise serializers.ValidationError("Invalid email address.")
+        return value
 
 class MessageSerializer(serializers.ModelSerializer):
-    sender = UserSerializer(read_only=True)
+    sender = serializers.PrimaryKeyRelatedField(read_only=True)
+    conversation = serializers.PrimaryKeyRelatedField(read_only=True)
+    message_body = serializers.CharField(required=True)
 
     class Meta:
         model = Message
-        fields = ['message_id', 'conversation', 'sender', 'message_body', 'sent_at']
-        read_only_fields = ['message_id', 'sent_at', 'sender']
+        fields = ['message_id', 'sender', 'conversation', 'message_body', 'sent_at']
+        read_only_fields = ['message_id', 'sender', 'conversation', 'sent_at']
 
-    def validate_message_body(self, value):
-        if not value.strip():
-            raise serializers.ValidationError("Message body cannot be empty.")
-        return value
+    def create(self, validated_data):
+        """Create a new message."""
+        return Message.objects.create(**validated_data)
+
+    def to_representation(self, instance):
+        """Customize the message representation."""
+        data = super().to_representation(instance)
+        data['sender_name'] = instance.sender.get_full_name()
+        return data
 
 class ConversationSerializer(serializers.ModelSerializer):
-    participants = UserSerializer(many=True, read_only=True)
+    participants = serializers.PrimaryKeyRelatedField(many=True, read_only=True)
     messages = MessageSerializer(many=True, read_only=True)
-    participant_ids = serializers.ListField(
-        child=serializers.UUIDField(),
-        write_only=True,
-        source='participants',
-        required=True
-    )
-    participant_count = serializers.SerializerMethodField()
+    message_count = serializers.SerializerMethodField()
 
     class Meta:
         model = Conversation
-        fields = ['conversation_id', 'participants', 'participant_ids', 'messages', 'created_at', 'updated_at', 'participant_count']
-        read_only_fields = ['conversation_id', 'created_at', 'updated_at', 'participants', 'messages']
+        fields = ['conversation_id', 'participants',
+                  'created_at', 'messages', 'message_count']
+        read_only_fields = ['created_at']
 
-    def get_participant_count(self, obj):
-        return obj.participants.count()
-
-    def validate_participant_ids(self, value):
-        if len(value) < 1:
-            raise serializers.ValidationError("A conversation must have at least one participant.")
-        for user_id in value:
-            if not User.objects.filter(user_id=user_id).exists():
-                raise serializers.ValidationError(f"User with ID {user_id} does not exist.")
-        return value
-
-    def create(self, validated_data):
-        participant_ids = validated_data.pop('participants', [])
-        conversation = Conversation.objects.create(**validated_data)
-        for user_id in participant_ids:
-            user = User.objects.get(user_id=user_id)
-            conversation.participants.add(user)
-        if self.context['request'].user.is_authenticated:
-            conversation.participants.add(self.context['request'].user)
-        return conversation
+    def get_message_count(self, obj):
+        return obj.messages.count()
